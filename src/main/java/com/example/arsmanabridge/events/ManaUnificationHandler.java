@@ -1,67 +1,88 @@
 package com.example.arsmanabridge.events;
 
+import com.example.arsmanabridge.ArsManabridge;
+import com.example.arsmanabridge.config.BridgeConfig;
+import com.hollingsworth.arsnouveau.api.mana.IManaCap;
+import com.hollingsworth.arsnouveau.setup.registry.CapabilityRegistry;
+import io.redspace.ironsspellbooks.api.magic.MagicData;
+import io.redspace.ironsspellbooks.api.registry.AttributeRegistry;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
-import net.minecraft.world.entity.ai.attributes.EquipmentSlotGroup;
-import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
 import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.event.tick.PlayerTickEvent;
+import net.neoforged.neoforge.event.entity.living.LivingEquipmentChangeEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 
-@EventBusSubscriber(modid = "arsmanabridge", bus = EventBusSubscriber.Bus.GAME)
 public class ManaUnificationHandler {
 
-    // Unique ResourceLocation for our bridge's modifier
-    private static final ResourceLocation ARS_BONUS_MODIFIER_ID = 
-        ResourceLocation.fromNamespaceAndPath("arsmanabridge", "ars_mana_bonus");
+    // ResourceLocation key for our bridge modifier (1.21.1 uses ResourceLocation, not UUID)
+    private static final ResourceLocation BRIDGE_MAX_MANA_RL =
+            ResourceLocation.fromNamespaceAndPath("arsmanabridge", "ars_max_mana_sync");
 
     @SubscribeEvent
-    public static void onPlayerTick(PlayerTickEvent.Post event) {
-        Player player = event.getEntity();
-        
-        // Only run synchronization on the logical server side
-        if (player.level().isClientSide()) return;
+    public void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        syncMaxMana(player);
+    }
 
-        // 1. Fetch Ars Nouveau's Mana Attachment
-        com.hollingsworth.arsnouveau.api.mana.IMana arsMana = 
-            com.hollingsworth.arsnouveau.api.CapabilityRegistry.getMana(player);
+    @SubscribeEvent
+    public void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        syncMaxMana(player);
+    }
 
-        if (arsMana == null) return;
+    @SubscribeEvent
+    public void onEquipmentChange(LivingEquipmentChangeEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        player.getServer().tell(new net.minecraft.server.TickTask(
+                player.getServer().getTickCount() + 1,
+                () -> syncMaxMana(player)
+        ));
+    }
 
-        // 2. Fetch Iron's Spells Max Mana Attribute Instance
-        var ironMaxManaAttribute = player.getAttribute(
-            net.iron431.irons_spellbooks.registry.AttributeRegistry.MAX_MANA.get()
-        );
+    public static void syncMaxMana(ServerPlayer player) {
+        if (!BridgeConfig.isIssPrimary() && !BridgeConfig.isArsPrimary()) return;
+        Level level = player.level();
+        if (level.isClientSide()) return;
 
-        if (ironMaxManaAttribute != null) {
-            // Calculate how much extra mana Ars Nouveau expects the player to have 
-            // from learned Glyphs, Perks, and worn Ars Armor pieces.
-            int arsMax = arsMana.getMaxMana();
-            int arsBase = 100; // Ars Nouveau default starting base mana
-            int arsBonusDelta = arsMax - arsBase;
-
-            // Safely clear the old modifier before applying the updated one
-            ironMaxManaAttribute.removeModifier(ARS_BONUS_MODIFIER_ID);
-            
-            if (arsBonusDelta > 0) {
-                AttributeModifier modifier = new AttributeModifier(
-                    ARS_BONUS_MODIFIER_ID, 
-                    arsBonusDelta, 
-                    AttributeModifier.Operation.ADD_VALUE
-                );
-                ironMaxManaAttribute.addTransientModifier(modifier);
-            }
+        if (BridgeConfig.isIssPrimary()) {
+            syncArsMaxToIrons(player);
         }
+    }
 
-        // 3. Keep current mana values perfectly linked between systems
-        float masterMaxMana = (float) player.getAttributeValue(
-            net.iron431.irons_spellbooks.registry.AttributeRegistry.MAX_MANA.get()
-        );
-        
-        float masterCurrentMana = net.iron431.irons_spellbooks.capabilities.magic.MagicData.getPlayerMagicData(player).getMana();
+    private static void syncArsMaxToIrons(ServerPlayer player) {
+        try {
+            IManaCap manaCap = CapabilityRegistry.getMana(player);
+            if (manaCap == null) return;
 
-        // Push values back down to Ars Nouveau so its spells consume from the shared pool
-        arsMana.setMaxMana((int) masterMaxMana);
-        arsMana.setMana((int) masterCurrentMana);
+            int arsMax = manaCap.getMaxMana();
+
+            AttributeInstance ironsMaxMana = player.getAttribute(AttributeRegistry.MAX_MANA);
+            if (ironsMaxMana == null) return;
+
+            // Remove our old modifier (1.21.1 API: removeModifier takes ResourceLocation)
+            ironsMaxMana.removeModifier(BRIDGE_MAX_MANA_RL);
+
+            double ironsBase = ironsMaxMana.getBaseValue();
+            double bonus = Math.max(0, arsMax - ironsBase);
+            if (bonus > 0) {
+                // 1.21.1 AttributeModifier: (ResourceLocation, double, Operation)
+                ironsMaxMana.addTransientModifier(new AttributeModifier(
+                        BRIDGE_MAX_MANA_RL,
+                        bonus,
+                        AttributeModifier.Operation.ADD_VALUE
+                ));
+            }
+
+            ArsManabridge.LOGGER.debug(
+                    "Synced Ars max mana {} -> Iron's MAX_MANA (base={}, bonus={})",
+                    arsMax, ironsBase, bonus);
+
+        } catch (Exception e) {
+            ArsManabridge.LOGGER.error("Failed to sync max mana for {}: {}",
+                    player.getName().getString(), e.getMessage());
+        }
     }
 }
