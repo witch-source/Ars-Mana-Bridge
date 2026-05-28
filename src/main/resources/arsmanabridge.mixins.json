@@ -1,0 +1,19 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.example.arsmanabridge.mixin",
+  "plugin": "com.example.arsmanabridge.mixin.ArsManabrMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ars.MixinManaCapability",
+    "ars.MixinSpellResolverMana",
+    "ars.MixinSpellResolverPreCast"
+  ],
+  "client": [
+    "ars.MixinArsManaHud",
+    "irons.MixinIronsManaBarOverlay"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
